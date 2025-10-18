@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Find Rescues & Shelters Nearby</title>
+  <style>
+    :root { --border:#e5e7eb; --text:#111827; --muted:#6b7280; --bg:#ffffff; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); margin:0; }
+    .wrap { max-width: 880px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 1.6rem; margin: 0 0 8px; }
+    p.lead { color: var(--muted); margin: 0 0 16px; }
+    form { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; margin: 16px 0 20px; }
+    input, select, button { padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; }
+    button { background:#111; color:#fff; border-color:#111; cursor:pointer }
+    button[disabled]{ opacity:.7; cursor:not-allowed }
+    #msg { color:#374151; margin: 6px 0 10px; min-height: 1.2em; }
+    ul { list-style: none; padding: 0; display: grid; gap: 10px; }
+    li { border: 1px solid var(--border); border-radius: 14px; padding: 12px; }
+    .row { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .links a { margin-right: 12px; text-decoration: underline; font-size: 14px; }
+    @media (max-width: 640px){ form { grid-template-columns: 1fr 1fr; } form button { grid-column: 1 / -1; } }
+    .small { font-size:12px; color:#6b7280; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Find Rescues & Shelters Nearby</h1>
+    <p class="lead">Enter a city or ZIP, choose a radius, then search. Data from OpenStreetMap (free).</p>
+
+    <form id="f">
+      <input id="q" placeholder="e.g., Riverside, CA or 92501" />
+      <select id="radius">
+        <option value="10">10 km</option>
+        <option value="25" selected>25 km</option>
+        <option value="50">50 km</option>
+        <option value="100">100 km</option>
+      </select>
+      <button id="go" type="submit">Search</button>
+    </form>
+
+    <div id="msg"></div>
+    <ul id="list"></ul>
+    <p class="small">If you see nothing after searching, please try again or increase the radius. Some areas may not have shelters mapped in OSM.</p>
+  </div>
+
+  <script>
+    const $ = (s,p=document)=>p.querySelector(s);
+    const f = $('#f'), q = $('#q'), radius = $('#radius'), msg = $('#msg'), list = $('#list'), go = $('#go');
+
+    async function geocode(text){
+      const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(text);
+      const res = await fetch(url, { method: 'GET' });
+      if(!res.ok) throw new Error('Geocoding error ('+res.status+')');
+      const data = await res.json();
+      if(!data.length) throw new Error('Location not found');
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), display: data[0].display_name };
+    }
+
+    async function overpassQuery(query){
+      const endpoints = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter'
+      ];
+      let lastErr = null;
+      for(const ep of endpoints){
+        try{
+          const res = await fetch(ep, {
+            method:'POST',
+            headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:new URLSearchParams({data: query})
+          });
+          if(!res.ok) throw new Error('Overpass error ('+res.status+')');
+          return await res.json();
+        }catch(e){
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error('All Overpass endpoints failed');
+    }
+
+    async function searchOverpass(lat, lon, km){
+      const meters = Math.round(km*1000);
+      const query = `
+        [out:json][timeout:25];
+        (
+          node[amenity=animal_shelter](around:${meters},${lat},${lon});
+          way[amenity=animal_shelter](around:${meters},${lat},${lon});
+          relation[amenity=animal_shelter](around:${meters},${lat},${lon});
+        );
+        out center tags;`;
+      const data = await overpassQuery(query);
+      return (data.elements||[]).map(el=>{
+        const t = el.tags||{};
+        const name = t.name || '(No name)';
+        const city = t['addr:city']||'';
+        const street = [t['addr:housenumber'], t['addr:street']].filter(Boolean).join(' ');
+        const phone = t.phone || t['contact:phone'] || '';
+        const web = t.website || t['contact:website'] || '';
+        const lat2 = el.lat || el.center?.lat;
+        const lon2 = el.lon || el.center?.lon;
+        return { id:`${el.type}/${el.id}`, name, address:[street,city].filter(Boolean).join(', '), phone, web, lat:lat2, lon:lon2 };
+      });
+    }
+
+    function render(items){
+      list.innerHTML = '';
+      items.forEach(r=>{
+        const li = document.createElement('li');
+        li.innerHTML = \`
+          <div class="row">
+            <strong>\${r.name}</strong>
+            <span class="muted">OpenStreetMap</span>
+          </div>
+          \${r.address ? \`<div style="margin-top:4px">\${r.address}</div>\`:''}
+          <div class="links" style="margin-top:8px">
+            \${r.phone ? \`<a href="tel:\${r.phone}">Call</a>\`:''}
+            \${r.web ? \`<a href="\${r.web}" target="_blank" rel="noreferrer">Website</a>\`:''}
+            \${r.lat && r.lon ? \`<a href="https://www.google.com/maps?q=\${r.lat},\${r.lon}" target="_blank" rel="noreferrer">Map</a>\`:''}
+          </div>\`;
+        list.appendChild(li);
+      });
+    }
+
+    f.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      msg.textContent = ''; list.innerHTML = '';
+      const text = q.value.trim();
+      if(!text){ msg.textContent = 'Please enter a city or ZIP.'; return; }
+      go.disabled = true; go.textContent = 'Searching…';
+      try{
+        const loc = await geocode(text);
+        const km = Number(radius.value||25);
+        const items = await searchOverpass(loc.lat, loc.lon, km);
+        if(!items.length) msg.textContent = \`No results near \${loc.display}. Try a larger radius.\`;
+        render(items);
+      }catch(err){
+        console.error(err);
+        msg.textContent = err.message || 'Something went wrong.';
+      }finally{
+        go.disabled = false; go.textContent = 'Search';
+      }
+    });
+  </script>
+</body>
+</html>
